@@ -1,0 +1,5 @@
+*.o
+*.out
+*.ko
+bomb_game
+.DS_Store

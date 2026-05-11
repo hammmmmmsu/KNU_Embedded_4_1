@@ -1,9 +1,15 @@
-obj-m = led_driver.o
-KDIR := /home/user/linux-kernel
-PWD := $(shell pwd)
+CC = gcc
+CFLAGS = -Wall -Iinclude
 
-default:
-	make ARCH=arm CROSS_COMPILE=$(CR_C) -C $(KDIR) M=$(PWD) modules
+TARGET = bomb_game
+
+SRCS = src/main.c src/game.c src/mission.c \
+       drivers/led_driver.c drivers/fnd_driver.c \
+       drivers/dot_driver.c drivers/dip_driver.c \
+       drivers/interrupt_driver.c
+
+all:
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS)
 
 clean:
-	make ARCH=arm CROSS_COMPILE=$(CR_C) -C $(KDIR) M=$(PWD) clean
+	rm -f $(TARGET) *.o
