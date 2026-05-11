@@ -3,3 +3,4 @@
 *.ko
 bomb_game
 .DS_Store
+/build
