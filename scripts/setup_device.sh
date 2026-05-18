@@ -40,7 +40,6 @@ load_if_not fpga_led          "${HOME_DIR}/led_driver.ko"
 load_if_not fpga_fnd          "${HOME_DIR}/try/fnd_driver.ko"
 load_if_not fpga_push_switch  "${HOME_DIR}/try/push_driver.ko"
 load_if_not fpga_dip_switch   "${HOME_DIR}/dip_driver.ko"
-load_if_not itr_count_driver  "${HOME_DIR}/itr_shift_count_lab/itr_count_driver.ko"
 
 # ── 3. DOT driver — 새 버전(10-byte raw 패턴 지원) ────────
 echo ""
@@ -67,26 +66,44 @@ else
     fi
 fi
 
-# ── 4. /dev 엔트리 생성 ───────────────────────────────────
 echo ""
-echo "=== [4] /dev entries ==="
+echo "=== [4] Yellow interrupt button driver ==="
+if lsmod | grep -q "^itr_count_driver "; then
+    echo "  [UNLOAD] old itr_count_driver"
+    rmmod itr_count_driver
+fi
+if lsmod | grep -q "^interrupt_driver "; then
+    echo "  [SKIP] interrupt_driver already loaded"
+else
+    NEW_INTERRUPT="${GAME_DIR}/drivers/interrupt_driver.ko"
+    if [ ! -f "${NEW_INTERRUPT}" ]; then
+        echo "  [BUILD] Compiling interrupt_driver.ko..."
+        make -C /lib/modules/$(uname -r)/build \
+             M="${GAME_DIR}/drivers" modules 2>&1 | tail -3
+    fi
+    if [ -f "${NEW_INTERRUPT}" ]; then
+        echo "  [LOAD]  interrupt_driver (GPIO27 rising-edge)"
+        insmod "${NEW_INTERRUPT}"
+    else
+        echo "  [WARN] interrupt_driver.ko not found"
+    fi
+fi
+
+# ── 5. /dev 엔트리 생성 ───────────────────────────────────
+echo ""
+echo "=== [5] /dev entries ==="
 make_dev fpga_led          260
 make_dev fpga_fnd          261
 make_dev fpga_dot          262
 make_dev fpga_push_switch  265
 make_dev fpga_dip_switch   266
 
-INT_MAJOR="$(awk '$2 == "itr_count_dev" { print $1 }' /proc/devices)"
-if [ -n "${INT_MAJOR}" ]; then
-    if [ -e "/dev/fpga_interrupt" ]; then
-        rm -f /dev/fpga_interrupt
-    fi
-    make_dev fpga_interrupt "${INT_MAJOR}"
-else
-    echo "  [WARN] itr_count_dev major not found"
+if [ -e "/dev/fpga_interrupt" ]; then
+    rm -f /dev/fpga_interrupt
 fi
+make_dev fpga_interrupt 264
 
-# ── 5. 결과 확인 ─────────────────────────────────────────
+# ── 6. 결과 확인 ─────────────────────────────────────────
 echo ""
 echo "=== 완료 ==="
 ls -la /dev/fpga_* 2>/dev/null || echo "[WARN] /dev/fpga_* 없음"

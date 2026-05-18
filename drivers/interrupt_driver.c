@@ -1,59 +1,92 @@
 #include <linux/module.h>
-#include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/fs.h>
 #include <linux/uaccess.h>
+#include <linux/interrupt.h>
+#include <linux/jiffies.h>
+#include <linux/gpio.h>
 
-#define IOM_PUSH_MAJOR   263
-#define IOM_PUSH_NAME    "fpga_push_switch"
-#define IOM_PUSH_ADDRESS 0x082   /* 8-bit push switch register */
+#define GPIO_SW             27
+#define INTERRUPT_MAJOR     264
+#define INTERRUPT_NAME      "fpga_interrupt"
+#define DEBOUNCE_MS         80
 
-extern unsigned char iom_fpga_itf_read(unsigned int addr);
-extern ssize_t iom_fpga_itf_write(unsigned int addr, unsigned char value);
+static int irq_num = -1;
+static unsigned int press_count;
+static unsigned long last_jiffies;
 
-int iom_push_open(struct inode *inode, struct file *filp) { return 0; }
-int iom_push_release(struct inode *inode, struct file *filp) { return 0; }
-
-/*
- * Read: returns 1 byte bitmask of pressed buttons.
- * bit7 = SW1 (game start), bit0 = SW8.
- * Active-low: hardware returns 0 when pressed, driver inverts to 1=pressed.
- */
-ssize_t iom_push_read(struct file *filp, char *buf, size_t count, loff_t *f_pos)
+static irqreturn_t yellow_button_irq(int irq, void *dev_id)
 {
-    unsigned char value;
-    value = ~iom_fpga_itf_read((unsigned int)IOM_PUSH_ADDRESS);
-    if (copy_to_user(buf, &value, 1))
+    unsigned long now = jiffies;
+    if (time_before(now, last_jiffies + msecs_to_jiffies(DEBOUNCE_MS)))
+        return IRQ_HANDLED;
+
+    last_jiffies = now;
+    press_count++;
+    printk(KERN_INFO "fpga_interrupt: count=%u level=%d\n",
+           press_count, gpio_get_value(GPIO_SW));
+    return IRQ_HANDLED;
+}
+
+static ssize_t interrupt_read(struct file *file, char __user *buf,
+                              size_t count, loff_t *ppos)
+{
+    if (copy_to_user(buf, &press_count, sizeof(press_count)))
         return -EFAULT;
-    return 1;
+    return sizeof(press_count);
 }
 
-ssize_t iom_push_write(struct file *filp, const char *buf, size_t count, loff_t *f_pos)
-{
-    return count;
-}
-
-static struct file_operations iom_push_fops = {
-    .read    = iom_push_read,
-    .write   = iom_push_write,
-    .open    = iom_push_open,
-    .release = iom_push_release,
+static struct file_operations interrupt_fops = {
+    .owner = THIS_MODULE,
+    .read  = interrupt_read,
 };
 
-int iom_push_init(void)
+static int __init interrupt_init(void)
 {
-    int result = register_chrdev(IOM_PUSH_MAJOR, IOM_PUSH_NAME, &iom_push_fops);
-    if (result < 0)
-        printk(KERN_WARNING "fpga_push_switch: can't get major %d\n", IOM_PUSH_MAJOR);
-    printk(KERN_INFO "fpga_push_switch init, major = %d\n", IOM_PUSH_MAJOR);
-    return result;
+    int ret;
+
+    ret = gpio_request(GPIO_SW, INTERRUPT_NAME);
+    if (ret < 0)
+        printk(KERN_WARNING "fpga_interrupt: gpio_request failed (%d), continuing\n", ret);
+
+    gpio_direction_input(GPIO_SW);
+    irq_num = gpio_to_irq(GPIO_SW);
+
+    /*
+     * The breadboard circuit idles low, then rises when pressed.
+     * Previous lab code used FALLING only, which misses that press edge.
+     */
+    ret = request_irq(irq_num, yellow_button_irq, IRQF_TRIGGER_RISING,
+                      INTERRUPT_NAME, NULL);
+    if (ret < 0) {
+        printk(KERN_ERR "fpga_interrupt: request_irq failed (%d)\n", ret);
+        gpio_free(GPIO_SW);
+        return ret;
+    }
+
+    ret = register_chrdev(INTERRUPT_MAJOR, INTERRUPT_NAME, &interrupt_fops);
+    if (ret < 0) {
+        free_irq(irq_num, NULL);
+        gpio_free(GPIO_SW);
+        printk(KERN_ERR "fpga_interrupt: register_chrdev failed (%d)\n", ret);
+        return ret;
+    }
+
+    printk(KERN_INFO "fpga_interrupt: loaded major=%d gpio=%d irq=%d\n",
+           INTERRUPT_MAJOR, GPIO_SW, irq_num);
+    return 0;
 }
 
-void iom_push_exit(void)
+static void __exit interrupt_exit(void)
 {
-    unregister_chrdev(IOM_PUSH_MAJOR, IOM_PUSH_NAME);
-    printk(KERN_INFO "fpga_push_switch exit\n");
+    unregister_chrdev(INTERRUPT_MAJOR, INTERRUPT_NAME);
+    if (irq_num >= 0)
+        free_irq(irq_num, NULL);
+    gpio_free(GPIO_SW);
+    printk(KERN_INFO "fpga_interrupt: unloaded\n");
 }
 
-module_init(iom_push_init);
-module_exit(iom_push_exit);
+module_init(interrupt_init);
+module_exit(interrupt_exit);
 MODULE_LICENSE("GPL");

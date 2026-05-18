@@ -1,1 +1,2 @@
 obj-m += dot_driver.o
+obj-m += interrupt_driver.o
