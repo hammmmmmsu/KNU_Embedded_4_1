@@ -67,10 +67,11 @@ void fnd_write_mission(int fd, int mission_no, int sec)
 /* push: O_NONBLOCK으로 열어서 버튼 안 눌리면 즉시 0 반환 */
 unsigned char push_read(int fd)
 {
-    unsigned char val = 0;
-    ssize_t n = read(fd, &val, 1);
+    unsigned short val = 0;   /* 드라이버가 unsigned short(2바이트) 반환 */
+    ssize_t n = read(fd, &val, sizeof(val));
     if (n <= 0) return 0;
-    return val;
+    printf("[DEBUG] push raw=0x%04X\n", val); fflush(stdout);
+    return (val != 0) ? 1 : 0;
 }
 
 unsigned char dip_read(int fd)
