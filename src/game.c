@@ -122,11 +122,23 @@ static void print_banner(void)
     printf("╚══════════════════════════════════╝\n\n");
 }
 
-static void print_bits(unsigned char v)
+static unsigned char reverse_bits8(unsigned char v)
+{
+    unsigned char out = 0;
+    int i;
+    for (i = 0; i < 8; i++) {
+        out <<= 1;
+        out |= (unsigned char)(v & 1);
+        v >>= 1;
+    }
+    return out;
+}
+
+static void print_wire_pattern(unsigned char v)
 {
     int i;
     for (i = 7; i >= 0; i--)
-        printf("%c", (v >> i) & 1 ? '1' : '0');
+        printf("%c", (v >> i) & 1 ? '#' : '-');
 }
 
 /* ── button debounce (30ms) ──────────────────────────────── */
@@ -141,6 +153,20 @@ static int yellow_button_pressed(GameCtx *ctx)
         return 0;
     last_interrupt_count = now;
     return 1;
+}
+
+static void yellow_diag_print(GameCtx *ctx)
+{
+    static struct timespec last = {0, 0};
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long diff = (now.tv_sec - last.tv_sec) * 1000L
+              + (now.tv_nsec - last.tv_nsec) / 1000000L;
+    if (diff < 1000) return;
+    last = now;
+    printf("\r  노란 버튼 카운트: %u   검은 버튼 raw: 0x%02X   ",
+           interrupt_read_count(ctx->fd_interrupt), push_read(ctx->fd_push));
+    fflush(stdout);
 }
 
 /* ── fire animation (non-blocking) ──────────────────────── */
@@ -217,19 +243,19 @@ static MissionSpec mission_specs[MISSION_COUNT];
 static int mission_last_show = -1;
 static unsigned short prev_push_bits = 0;
 
-static const char *sw_name(unsigned short mask)
+static const char *sw_code(unsigned short mask)
 {
     switch (mask) {
-    case 0x001: return "SW8";
-    case 0x002: return "SW9";
-    case 0x004: return "SW10";
-    case 0x008: return "SW11";
-    case 0x010: return "SW12";
-    case 0x020: return "SW13";
-    case 0x040: return "SW14";
-    case 0x080: return "SW15";
-    case 0x100: return "SW16";
-    default:    return "SW?";
+    case 0x001: return "A";
+    case 0x002: return "B";
+    case 0x004: return "C";
+    case 0x008: return "D";
+    case 0x010: return "E";
+    case 0x020: return "F";
+    case 0x040: return "G";
+    case 0x080: return "H";
+    case 0x100: return "I";
+    default:    return "?";
     }
 }
 
@@ -247,6 +273,21 @@ static unsigned short push_new_press(int fd)
     unsigned short fresh = now & (unsigned short)(~prev_push_bits);
     prev_push_bits = now;
     return fresh;
+}
+
+static unsigned char led_for_push(unsigned short mask)
+{
+    switch (mask) {
+    case 0x001: return 0x80;
+    case 0x002: return 0x40;
+    case 0x004: return 0x20;
+    case 0x008: return 0x10;
+    case 0x010: return 0x08;
+    case 0x020: return 0x04;
+    case 0x040: return 0x02;
+    case 0x080: return 0x01;
+    default:    return 0x00;
+    }
 }
 
 static void seed_missions(void)
@@ -277,20 +318,20 @@ static void mission_show(GameCtx *ctx, int idx)
     printf("│                             │\n");
 
     if (m->kind == MISSION_DIP_CODE) {
-        printf("│  [DIP CODE] LED 패턴 복제    │\n");
-        printf("│  목표 LED:  "); print_bits(m->dip_target); printf("  │\n");
+        printf("│  [WIRE CUT] 점등선 복제      │\n");
+        printf("│  목표 선로: "); print_wire_pattern(reverse_bits8(m->dip_target)); printf("  │\n");
         printf("│  DIP 맞춘 뒤 노란 버튼 제출 │\n");
         led_write(ctx->fd_led, m->dip_target);
     } else if (m->kind == MISSION_SW_SEQUENCE) {
-        printf("│  [SW SEQ] 버튼 순서 입력     │\n");
-        printf("│  순서: %-4s %-4s %-4s        │\n",
-               sw_name(m->sw_sequence[0]), sw_name(m->sw_sequence[1]), sw_name(m->sw_sequence[2]));
-        printf("│  SW8~SW16 버튼을 순서대로   │\n");
+        printf("│  [AUTH] 버튼 코드 입력       │\n");
+        printf("│  코드: %-4s %-4s %-4s        │\n",
+               sw_code(m->sw_sequence[0]), sw_code(m->sw_sequence[1]), sw_code(m->sw_sequence[2]));
+        printf("│  LED가 가리키는 버튼을 입력 │\n");
         led_write(ctx->fd_led, LED_ALL_OFF);
     } else {
         printf("│  [MIXED] 2단계 해제          │\n");
-        printf("│  1. DIP:   "); print_bits(m->dip_target); printf("  │\n");
-        printf("│  2. 승인:  %-4s              │\n", sw_name(m->confirm_button));
+        printf("│  1. 선로:  "); print_wire_pattern(reverse_bits8(m->dip_target)); printf("  │\n");
+        printf("│  2. 승인코드: %-4s           │\n", sw_code(m->confirm_button));
         led_write(ctx->fd_led, m->dip_target);
     }
     printf("└─────────────────────────────┘\n");
@@ -337,7 +378,7 @@ static int mission_step(GameCtx *ctx, int idx)
 
     if (m->kind == MISSION_DIP_CODE) {
         dip = dip_read(ctx->fd_dip);
-        printf("\r  현재 DIP:  "); print_bits(dip);
+        printf("\r  현재 DIP:  "); print_wire_pattern(reverse_bits8(dip));
         printf(dip == m->dip_target ? "  일치. 노란 버튼으로 제출  " : "  불일치                  ");
         fflush(stdout);
         if (!yellow_button_pressed(ctx)) return 0;
@@ -346,8 +387,9 @@ static int mission_step(GameCtx *ctx, int idx)
 
     fresh = push_new_press(ctx->fd_push);
     if (m->kind == MISSION_SW_SEQUENCE) {
-        printf("\r  진행: %d / %d   다음: %-4s        ",
-               m->sequence_pos, m->sequence_len, sw_name(m->sw_sequence[m->sequence_pos]));
+        led_write(ctx->fd_led, led_for_push(m->sw_sequence[m->sequence_pos]));
+        printf("\r  진행: %d / %d   다음 코드: %-4s        ",
+               m->sequence_pos, m->sequence_len, sw_code(m->sw_sequence[m->sequence_pos]));
         fflush(stdout);
         if (!fresh) return 0;
         if (fresh == m->sw_sequence[m->sequence_pos]) {
@@ -361,8 +403,9 @@ static int mission_step(GameCtx *ctx, int idx)
     }
 
     dip = dip_read(ctx->fd_dip);
-    printf("\r  DIP: "); print_bits(dip);
-    printf("  / 승인 버튼: %-4s        ", sw_name(m->confirm_button));
+    led_write(ctx->fd_led, m->dip_target | led_for_push(m->confirm_button));
+    printf("\r  선로: "); print_wire_pattern(reverse_bits8(dip));
+    printf("  / 승인 코드: %-4s        ", sw_code(m->confirm_button));
     fflush(stdout);
     if (!fresh) return 0;
     if (dip == m->dip_target && fresh == m->confirm_button)
@@ -424,6 +467,7 @@ void game_update(GameCtx *ctx)
     case STATE_WAITING:
         anim_bomb_fire(ctx);
         fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
+        yellow_diag_print(ctx);
 
         if (yellow_button_pressed(ctx)) {
 
