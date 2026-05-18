@@ -16,7 +16,7 @@ int dot_open(void)  { int fd = open(DEV_DOT,  O_WRONLY); if (fd<0) perror("dot")
 int led_open(void)  { int fd = open(DEV_LED,  O_WRONLY); if (fd<0) perror("led");  return fd; }
 int fnd_open(void)  { int fd = open(DEV_FND,  O_WRONLY); if (fd<0) perror("fnd");  return fd; }
 int dip_open(void)  { int fd = open(DEV_DIP,  O_RDONLY); if (fd<0) perror("dip");  return fd; }
-int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY); if (fd<0) perror("push"); return fd; }
+int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY | O_NONBLOCK); if (fd<0) perror("push"); return fd; }
 
 void dot_close(int fd)  { close(fd); }
 void led_close(int fd)  { close(fd); }
@@ -64,18 +64,20 @@ void fnd_write_mission(int fd, int mission_no, int sec)
     write(fd, d, 4);
 }
 
-/* push: 값 읽기 — char device는 lseek 안 됨, 그냥 read */
+/* push: O_NONBLOCK으로 열어서 버튼 안 눌리면 즉시 0 반환 */
 unsigned char push_read(int fd)
 {
     unsigned char val = 0;
-    read(fd, &val, 1);
+    ssize_t n = read(fd, &val, 1);
+    if (n <= 0) return 0;
     return val;
 }
 
 unsigned char dip_read(int fd)
 {
     unsigned char val = 0;
-    read(fd, &val, 1);
+    ssize_t n = read(fd, &val, 1);
+    if (n <= 0) return 0;
     return val;
 }
 
@@ -277,9 +279,16 @@ int game_init(GameCtx *ctx)
     ts_now(&ctx->last_frame);
     ts_now(&ctx->last_tick);
 
+    printf("[DEBUG] writing to LED fd=%d\n", ctx->fd_led); fflush(stdout);
     led_write(ctx->fd_led, LED_ALL_OFF);
+    printf("[DEBUG] writing to FND fd=%d\n", ctx->fd_fnd); fflush(stdout);
     fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
+    printf("[DEBUG] writing to DOT fd=%d\n", ctx->fd_dot); fflush(stdout);
     dot_write_pattern(ctx->fd_dot, DOT_BOMB_FIRE[0]);
+    printf("[DEBUG] reading PUSH fd=%d\n", ctx->fd_push); fflush(stdout);
+    { unsigned char t = push_read(ctx->fd_push); printf("[DEBUG] push=%d\n", t); fflush(stdout); }
+    printf("[DEBUG] reading DIP fd=%d\n", ctx->fd_dip); fflush(stdout);
+    { unsigned char t = dip_read(ctx->fd_dip); printf("[DEBUG] dip=%d\n", t); fflush(stdout); }
 
     print_banner();
     printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
