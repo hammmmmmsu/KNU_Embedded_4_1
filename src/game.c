@@ -17,55 +17,16 @@
 int dot_open(void)  { int fd = open(DEV_DOT,  O_WRONLY); if (fd<0) perror("dot");  return fd; }
 int led_open(void)  { int fd = open(DEV_LED,  O_WRONLY); if (fd<0) perror("led");  return fd; }
 int fnd_open(void)  { int fd = open(DEV_FND,  O_WRONLY); if (fd<0) perror("fnd");  return fd; }
-int dip_open(void)  { int fd = open(DEV_DIP, O_RDONLY); if (fd<0) perror("dip"); return fd; }
-
-/* GPIO sysfs 버튼 초기화: export → direction=in → value 파일 열기 */
-int push_open(void)
-{
-    char path[64];
-
-    /* export (이미 export됐으면 EBUSY 무시) */
-    int efd = open("/sys/class/gpio/export", O_WRONLY);
-    if (efd >= 0) {
-        char num[8];
-        snprintf(num, sizeof(num), "%d", BTN_GPIO_NUM);
-        write(efd, num, strlen(num));
-        close(efd);
-        usleep(100000); /* udev가 파일 생성할 시간 */
-    }
-
-    /* direction = in */
-    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", BTN_GPIO_NUM);
-    int dfd = open(path, O_WRONLY);
-    if (dfd >= 0) { write(dfd, "in", 2); close(dfd); }
-
-    /* value 파일 열기 */
-    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", BTN_GPIO_NUM);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "gpio%d/value open failed: %s\n", BTN_GPIO_NUM, strerror(errno));
-        fprintf(stderr, "  → BTN_GPIO_NUM(%d) 이 틀렸을 수 있음. 'raspi-gpio get' 로 핀 번호 확인!\n", BTN_GPIO_NUM);
-    }
-    return fd;
-}
+int dip_open(void)  { int fd = open(DEV_DIP,  O_RDONLY);            if (fd<0) perror("dip");  return fd; }
+int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY|O_NONBLOCK); if (fd<0) perror("push"); return fd; }
+int interrupt_open(void) { int fd = open(DEV_INTERRUPT, O_RDONLY); if (fd<0) perror("interrupt"); return fd; }
 
 void dot_close(int fd)  { close(fd); }
 void led_close(int fd)  { close(fd); }
 void fnd_close(int fd)  { close(fd); }
 void dip_close(int fd)  { close(fd); }
-
-/* GPIO unexport */
-void push_close(int fd)
-{
-    close(fd);
-    int efd = open("/sys/class/gpio/unexport", O_WRONLY);
-    if (efd >= 0) {
-        char num[8];
-        snprintf(num, sizeof(num), "%d", BTN_GPIO_NUM);
-        write(efd, num, strlen(num));
-        close(efd);
-    }
-}
+void push_close(int fd) { close(fd); }
+void interrupt_close(int fd) { close(fd); }
 
 /* ── device write/read helpers ───────────────────────────── */
 
@@ -85,35 +46,38 @@ void led_write(int fd, unsigned char mask)
     write(fd, &mask, 1);
 }
 
-/* FND: 4자리 BCD (digit[0]=천, digit[3]=일) */
+/*
+ * 현재 적재된 fnd_driver는 이전 실습 코드와 동일하게 packed BCD 2바이트를 받는다.
+ * [천|백], [십|일] 형식으로 보내야 909 같은 깨진 값 대신 실제 숫자가 보인다.
+ */
+static void fnd_write_number(int fd, int value)
+{
+    unsigned char d[2];
+    if (value < 0) value = 0;
+    if (value > 9999) value = 9999;
+    d[0] = (unsigned char)((((value / 1000) % 10) << 4) | ((value / 100) % 10));
+    d[1] = (unsigned char)((((value / 10) % 10) << 4) | (value % 10));
+    write(fd, d, sizeof(d));
+}
+
 void fnd_write_seconds(int fd, int sec)
 {
-    unsigned char d[4];
-    if (sec < 0) sec = 0;
-    d[0] = 0x0F;                       /* blank */
-    d[1] = 0x0F;                       /* blank */
-    d[2] = (unsigned char)((sec / 10) % 10);
-    d[3] = (unsigned char)(sec % 10);
-    write(fd, d, 4);
+    fnd_write_number(fd, sec);
 }
 
 void fnd_write_mission(int fd, int mission_no, int sec)
 {
-    unsigned char d[4];
-    d[0] = (unsigned char)(mission_no & 0x0F); /* 미션 번호 */
-    d[1] = 0x0F;                               /* blank */
-    d[2] = (unsigned char)((sec / 10) % 10);
-    d[3] = (unsigned char)(sec % 10);
-    write(fd, d, 4);
+    (void)mission_no;
+    fnd_write_seconds(fd, sec);
 }
 
-/* GPIO sysfs value 읽기: 눌리면 0(active-low) or 1(active-high) */
+/* push_switch 읽기 (O_NONBLOCK — 안 눌리면 EAGAIN → 0 반환) */
 unsigned char push_read(int fd)
 {
-    char c = '0';
-    lseek(fd, 0, SEEK_SET);
-    read(fd, &c, 1);
-    return (c == '1') ? 1 : 0;
+    unsigned short val = 0;
+    ssize_t n = read(fd, &val, sizeof(val));
+    if (n < 0) return 0;   /* EAGAIN 포함 */
+    return (unsigned char)(val & 0xFF);
 }
 
 unsigned char dip_read(int fd)
@@ -122,6 +86,15 @@ unsigned char dip_read(int fd)
     ssize_t n = read(fd, &val, 1);
     if (n <= 0) return 0;
     return val;
+}
+
+unsigned int interrupt_read_count(int fd)
+{
+    unsigned int count = 0;
+    ssize_t n = read(fd, &count, sizeof(count));
+    lseek(fd, 0, SEEK_SET);
+    if (n <= 0) return 0;
+    return count;
 }
 
 /* ── elapsed helpers ─────────────────────────────────────── */
@@ -158,33 +131,16 @@ static void print_bits(unsigned char v)
 
 /* ── button debounce (30ms) ──────────────────────────────── */
 
-/* 1초마다 GPIO 상태 출력 (디버그 — 버튼 눌리면 1 찍히면 정상) */
-static void push_diag_print(int fd)
-{
-    static struct timespec last = {0, 0};
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long diff = (now.tv_sec - last.tv_sec) * 1000L
-              + (now.tv_nsec - last.tv_nsec) / 1000000L;
-    if (diff < 1000) return;
-    last = now;
+/* 1초마다 push 값 출력 (어떤 버튼 누르면 숫자 바뀌는지 확인용) */
+static unsigned int last_interrupt_count = 0;
 
-    unsigned char val = push_read(fd);
-    printf("\r  [GPIO%d=%d]  노란 버튼을 눌러보세요 (1이 되면 정상) ...", BTN_GPIO_NUM, val);
-    fflush(stdout);
-}
-
-/* 버튼 눌려 있으면 1 반환 */
-static int btn_pressed(int fd)
+static int yellow_button_pressed(GameCtx *ctx)
 {
-    return push_read(fd) ? 1 : 0;
-}
-
-static void wait_btn_release(int fd)
-{
-    while (push_read(fd))
-        usleep(50000);
-    usleep(50000); /* 디바운스 */
+    unsigned int now = interrupt_read_count(ctx->fd_interrupt);
+    if (now == last_interrupt_count)
+        return 0;
+    last_interrupt_count = now;
+    return 1;
 }
 
 /* ── fire animation (non-blocking) ──────────────────────── */
@@ -236,83 +192,182 @@ void anim_success(GameCtx *ctx)
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  MISSION: DIP switch 패턴 맞추기
- *
- *  - LED로 목표 패턴을 보여줌
- *  - 사용자가 DIP 스위치를 같은 패턴으로 설정
- *  - SW1(인터럽트 버튼) 눌러서 제출
- *  - 맞으면 통과, 틀리면 -5초 페널티 후 재도전
+ *  MISSIONS
+ *  1) DIP code match: LED target pattern을 DIP으로 맞춘 뒤 제출
+ *  2) SW sequence: 터미널에 제시된 SW8~SW16 순서를 입력
+ *  3) Mixed unlock: DIP 패턴을 맞춘 뒤 지정된 SW 버튼으로 최종 승인
  * ═══════════════════════════════════════════════════════════ */
 
-static unsigned char mission_targets[MISSION_COUNT];
+typedef enum {
+    MISSION_DIP_CODE = 0,
+    MISSION_SW_SEQUENCE,
+    MISSION_MIXED_UNLOCK,
+} MissionKind;
+
+typedef struct {
+    MissionKind kind;
+    unsigned char dip_target;
+    unsigned short sw_sequence[3];
+    int sequence_len;
+    int sequence_pos;
+    unsigned short confirm_button;
+} MissionSpec;
+
+static MissionSpec mission_specs[MISSION_COUNT];
+static int mission_last_show = -1;
+static unsigned short prev_push_bits = 0;
+
+static const char *sw_name(unsigned short mask)
+{
+    switch (mask) {
+    case 0x001: return "SW8";
+    case 0x002: return "SW9";
+    case 0x004: return "SW10";
+    case 0x008: return "SW11";
+    case 0x010: return "SW12";
+    case 0x020: return "SW13";
+    case 0x040: return "SW14";
+    case 0x080: return "SW15";
+    case 0x100: return "SW16";
+    default:    return "SW?";
+    }
+}
+
+static unsigned short push_read_all(int fd)
+{
+    unsigned short val = 0;
+    ssize_t n = read(fd, &val, sizeof(val));
+    if (n <= 0) return 0;
+    return val;
+}
+
+static unsigned short push_new_press(int fd)
+{
+    unsigned short now = push_read_all(fd);
+    unsigned short fresh = now & (unsigned short)(~prev_push_bits);
+    prev_push_bits = now;
+    return fresh;
+}
+
+static void seed_missions(void)
+{
+    static const unsigned short seq_pool[] = {0x002, 0x004, 0x008, 0x010, 0x020};
+    int i;
+
+    mission_specs[0].kind = MISSION_DIP_CODE;
+    mission_specs[0].dip_target = (unsigned char)(rand() % 255 + 1);
+
+    mission_specs[1].kind = MISSION_SW_SEQUENCE;
+    mission_specs[1].sequence_len = 3;
+    mission_specs[1].sequence_pos = 0;
+    for (i = 0; i < mission_specs[1].sequence_len; i++)
+        mission_specs[1].sw_sequence[i] = seq_pool[rand() % (sizeof(seq_pool) / sizeof(seq_pool[0]))];
+
+    mission_specs[2].kind = MISSION_MIXED_UNLOCK;
+    mission_specs[2].dip_target = (unsigned char)(rand() % 255 + 1);
+    mission_specs[2].confirm_button = seq_pool[rand() % (sizeof(seq_pool) / sizeof(seq_pool[0]))];
+}
 
 static void mission_show(GameCtx *ctx, int idx)
 {
+    MissionSpec *m = &mission_specs[idx];
     printf("\n┌─────────────────────────────┐\n");
     printf("│  미션 %d / %d                 │\n", idx + 1, MISSION_COUNT);
     printf("│  남은 시간: %2d초             │\n", ctx->time_left);
     printf("│                             │\n");
-    printf("│  LED 패턴:  ");
-    print_bits(mission_targets[idx]);
-    printf("  │\n");
-    printf("│  DIP 스위치를 맞추고        │\n");
-    printf("│  SW1(인터럽트) 버튼 누르기  │\n");
+
+    if (m->kind == MISSION_DIP_CODE) {
+        printf("│  [DIP CODE] LED 패턴 복제    │\n");
+        printf("│  목표 LED:  "); print_bits(m->dip_target); printf("  │\n");
+        printf("│  DIP 맞춘 뒤 노란 버튼 제출 │\n");
+        led_write(ctx->fd_led, m->dip_target);
+    } else if (m->kind == MISSION_SW_SEQUENCE) {
+        printf("│  [SW SEQ] 버튼 순서 입력     │\n");
+        printf("│  순서: %-4s %-4s %-4s        │\n",
+               sw_name(m->sw_sequence[0]), sw_name(m->sw_sequence[1]), sw_name(m->sw_sequence[2]));
+        printf("│  SW8~SW16 버튼을 순서대로   │\n");
+        led_write(ctx->fd_led, LED_ALL_OFF);
+    } else {
+        printf("│  [MIXED] 2단계 해제          │\n");
+        printf("│  1. DIP:   "); print_bits(m->dip_target); printf("  │\n");
+        printf("│  2. 승인:  %-4s              │\n", sw_name(m->confirm_button));
+        led_write(ctx->fd_led, m->dip_target);
+    }
     printf("└─────────────────────────────┘\n");
-    led_write(ctx->fd_led, mission_targets[idx]);
 }
 
-/* mission 진행 — 1 step씩 호출됨. 완료 시 1 반환 */
+static int mission_fail(GameCtx *ctx)
+{
+    int j;
+    printf("\n\n  [!!] 틀렸습니다! -5초 페널티\n");
+    for (j = 0; j < 4; j++) {
+        led_write(ctx->fd_led, LED_ALL_ON);
+        usleep(100000);
+        led_write(ctx->fd_led, LED_ALL_OFF);
+        usleep(100000);
+    }
+    ctx->time_left -= 5;
+    if (ctx->time_left < 0) ctx->time_left = 0;
+    fnd_write_seconds(ctx->fd_fnd, ctx->time_left);
+    mission_last_show = -1;
+    return 0;
+}
+
+static int mission_success(GameCtx *ctx, int idx)
+{
+    printf("\n\n  [OK] 미션 %d 해제 성공!\n", idx + 1);
+    led_write(ctx->fd_led, LED_ALL_ON);
+    usleep(350000);
+    led_write(ctx->fd_led, LED_ALL_OFF);
+    mission_last_show = -1;
+    prev_push_bits = 0;
+    return 1;
+}
+
 static int mission_step(GameCtx *ctx, int idx)
 {
-    static int last_show = -1;   /* 마지막으로 출력한 미션 인덱스 */
+    MissionSpec *m = &mission_specs[idx];
     unsigned char dip;
+    unsigned short fresh;
 
-    /* 미션이 바뀌었을 때만 화면 출력 */
-    if (last_show != idx) {
+    if (mission_last_show != idx) {
         mission_show(ctx, idx);
-        last_show = idx;
+        mission_last_show = idx;
+    }
+
+    if (m->kind == MISSION_DIP_CODE) {
+        dip = dip_read(ctx->fd_dip);
+        printf("\r  현재 DIP:  "); print_bits(dip);
+        printf(dip == m->dip_target ? "  일치. 노란 버튼으로 제출  " : "  불일치                  ");
+        fflush(stdout);
+        if (!yellow_button_pressed(ctx)) return 0;
+        return (dip == m->dip_target) ? mission_success(ctx, idx) : mission_fail(ctx);
+    }
+
+    fresh = push_new_press(ctx->fd_push);
+    if (m->kind == MISSION_SW_SEQUENCE) {
+        printf("\r  진행: %d / %d   다음: %-4s        ",
+               m->sequence_pos, m->sequence_len, sw_name(m->sw_sequence[m->sequence_pos]));
+        fflush(stdout);
+        if (!fresh) return 0;
+        if (fresh == m->sw_sequence[m->sequence_pos]) {
+            m->sequence_pos++;
+            if (m->sequence_pos >= m->sequence_len)
+                return mission_success(ctx, idx);
+            return 0;
+        }
+        m->sequence_pos = 0;
+        return mission_fail(ctx);
     }
 
     dip = dip_read(ctx->fd_dip);
-
-    /* 현재 DIP 상태 한 줄 갱신 */
-    printf("\r  현재 DIP:  ");
-    print_bits(dip);
-    if (dip == mission_targets[idx])
-        printf("  ✓ 일치! SW1 눌러서 제출  ");
-    else
-        printf("  ✗ 불일치              ");
+    printf("\r  DIP: "); print_bits(dip);
+    printf("  / 승인 버튼: %-4s        ", sw_name(m->confirm_button));
     fflush(stdout);
-
-    /* SW1 누름 감지 */
-    if (!btn_pressed(ctx->fd_push))
-        return 0;
-
-    wait_btn_release(ctx->fd_push);
-
-    if (dip == mission_targets[idx]) {
-        printf("\n\n  [OK] 미션 %d 해제 성공!\n", idx + 1);
-        led_write(ctx->fd_led, LED_ALL_ON);
-        usleep(400000);
-        led_write(ctx->fd_led, LED_ALL_OFF);
-        last_show = -1;   /* 다음 미션 때 다시 출력 */
-        return 1;
-    } else {
-        printf("\n\n  [!!] 틀렸습니다! -5초 페널티\n");
-        /* 경고 LED 점멸 */
-        int j;
-        for (j = 0; j < 4; j++) {
-            led_write(ctx->fd_led, LED_ALL_ON);
-            usleep(100000);
-            led_write(ctx->fd_led, LED_ALL_OFF);
-            usleep(100000);
-        }
-        ctx->time_left -= 5;
-        if (ctx->time_left < 0) ctx->time_left = 0;
-        /* 패턴 다시 표시 */
-        mission_show(ctx, idx);
-        return 0;
-    }
+    if (!fresh) return 0;
+    if (dip == m->dip_target && fresh == m->confirm_button)
+        return mission_success(ctx, idx);
+    return mission_fail(ctx);
 }
 
 /* ── game_init / game_destroy ────────────────────────────── */
@@ -325,9 +380,10 @@ int game_init(GameCtx *ctx)
     ctx->fd_dot  = dot_open();
     ctx->fd_dip  = dip_open();
     ctx->fd_push = push_open();
+    ctx->fd_interrupt = interrupt_open();
 
     if (ctx->fd_led<0 || ctx->fd_fnd<0 || ctx->fd_dot<0 ||
-        ctx->fd_dip<0 || ctx->fd_push<0)
+        ctx->fd_dip<0 || ctx->fd_push<0 || ctx->fd_interrupt<0)
         return -1;
 
     ctx->state      = STATE_WAITING;
@@ -335,13 +391,14 @@ int game_init(GameCtx *ctx)
     ctx->fire_frame = 0;
     ts_now(&ctx->last_frame);
     ts_now(&ctx->last_tick);
+    last_interrupt_count = interrupt_read_count(ctx->fd_interrupt);
 
     led_write(ctx->fd_led, LED_ALL_OFF);
     fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
     dot_write_pattern(ctx->fd_dot, DOT_BOMB_FIRE[0]);
 
     print_banner();
-    printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
+    printf("  노란 인터럽트 버튼을 눌러 게임을 시작하세요.\n\n");
     return 0;
 }
 
@@ -354,6 +411,7 @@ void game_destroy(GameCtx *ctx)
     dot_close(ctx->fd_dot);
     dip_close(ctx->fd_dip);
     push_close(ctx->fd_push);
+    interrupt_close(ctx->fd_interrupt);
 }
 
 /* ── game_update (메인 루프에서 매 10ms 호출) ─────────────── */
@@ -366,16 +424,13 @@ void game_update(GameCtx *ctx)
     case STATE_WAITING:
         anim_bomb_fire(ctx);
         fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
-        push_diag_print(ctx->fd_push);
 
-        if (btn_pressed(ctx->fd_push)) {
-            wait_btn_release(ctx->fd_push);
+        if (yellow_button_pressed(ctx)) {
 
-            /* 랜덤 미션 패턴 생성 (0 제외) */
             srand((unsigned int)time(NULL));
-            int i;
-            for (i = 0; i < MISSION_COUNT; i++)
-                mission_targets[i] = (unsigned char)(rand() % 255 + 1);
+            seed_missions();
+            prev_push_bits = 0;
+            mission_last_show = -1;
 
             ctx->state         = STATE_PLAYING;
             ctx->time_left     = GAME_TIME_SEC;
@@ -398,8 +453,7 @@ void game_update(GameCtx *ctx)
         if (e >= 1000) {
             ctx->time_left -= (int)(e / 1000);
             ts_now(&ctx->last_tick);
-            fnd_write_mission(ctx->fd_fnd, ctx->mission_index + 1,
-                              ctx->time_left);
+            fnd_write_seconds(ctx->fd_fnd, ctx->time_left);
             if (ctx->time_left <= 0) {
                 ctx->state = STATE_FAIL;
                 break;
@@ -434,7 +488,7 @@ void game_update(GameCtx *ctx)
         led_write(ctx->fd_led, LED_ALL_OFF);
         fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
         print_banner();
-        printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
+        printf("  노란 인터럽트 버튼을 눌러 게임을 시작하세요.\n\n");
         ts_now(&ctx->last_frame);
         break;
 
@@ -451,7 +505,7 @@ void game_update(GameCtx *ctx)
         ctx->mission_index = 0;
         fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
         print_banner();
-        printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
+        printf("  노란 인터럽트 버튼을 눌러 게임을 시작하세요.\n\n");
         ts_now(&ctx->last_frame);
         break;
     }

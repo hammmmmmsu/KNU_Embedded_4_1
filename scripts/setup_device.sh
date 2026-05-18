@@ -40,6 +40,7 @@ load_if_not fpga_led          "${HOME_DIR}/led_driver.ko"
 load_if_not fpga_fnd          "${HOME_DIR}/try/fnd_driver.ko"
 load_if_not fpga_push_switch  "${HOME_DIR}/try/push_driver.ko"
 load_if_not fpga_dip_switch   "${HOME_DIR}/dip_driver.ko"
+load_if_not itr_count_driver  "${HOME_DIR}/itr_shift_count_lab/itr_count_driver.ko"
 
 # ── 3. DOT driver — 새 버전(10-byte raw 패턴 지원) ────────
 echo ""
@@ -74,6 +75,16 @@ make_dev fpga_fnd          261
 make_dev fpga_dot          262
 make_dev fpga_push_switch  265
 make_dev fpga_dip_switch   266
+
+INT_MAJOR="$(awk '$2 == "itr_count_dev" { print $1 }' /proc/devices)"
+if [ -n "${INT_MAJOR}" ]; then
+    if [ -e "/dev/fpga_interrupt" ]; then
+        rm -f /dev/fpga_interrupt
+    fi
+    make_dev fpga_interrupt "${INT_MAJOR}"
+else
+    echo "  [WARN] itr_count_dev major not found"
+fi
 
 # ── 5. 결과 확인 ─────────────────────────────────────────
 echo ""

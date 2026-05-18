@@ -19,7 +19,8 @@ typedef struct {
     int         fd_fnd;
     int         fd_dot;
     int         fd_dip;
-    int         fd_push;
+    int         fd_push;      /* SW8~SW16 */
+    int         fd_interrupt; /* yellow breadboard button */
 
     struct timespec last_tick;
     struct timespec last_frame;
@@ -48,6 +49,10 @@ void          fnd_write_mission(int fd, int mission_no, int sec);
 int           push_open(void);
 void          push_close(int fd);
 unsigned char push_read(int fd);
+
+int           interrupt_open(void);
+void          interrupt_close(int fd);
+unsigned int  interrupt_read_count(int fd);
 
 int           dip_open(void);
 void          dip_close(int fd);
