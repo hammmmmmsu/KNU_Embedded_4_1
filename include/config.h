@@ -6,7 +6,7 @@
 #define DEV_FND   "/dev/fpga_fnd"
 #define DEV_DOT   "/dev/fpga_dot"
 #define DEV_DIP   "/dev/fpga_dip_switch"
-#define DEV_PUSH  "/dev/fpga_push_switch"
+/* DEV_PUSH 제거 — 브레드보드 버튼은 GPIO sysfs로 직접 읽음 */
 
 /* Game settings */
 #define GAME_TIME_SEC      60    /* total countdown seconds */
@@ -19,12 +19,9 @@
 #define LED_BLINK_MS 200
 
 /*
- * Push-switch 비트 (~/try/push_driver.c 기준)
- *   bit0=SW8, bit1=SW9, ..., bit8=SW16
- *   → SW8(bit0) = 0x0001 을 Start/Confirm 버튼으로 사용
- *   → SW9(bit1) = 0x0002 도 Confirm 으로 인정
+ * 브레드보드 노란 버튼 → EXT_GP102 → Raspberry Pi BCM GPIO
+ * 틀릴 경우: Pi에서 'raspi-gpio get' 실행 후 올바른 번호로 수정
  */
-#define BTN_START   0x01   /* SW8 — 게임 시작 / 미션 제출 */
-#define BTN_ANY     0x1FF  /* 9개 버튼 중 아무거나 */
+#define BTN_GPIO_NUM  27   /* EXT_GP102 = BCM 27 (틀리면 수정) */
 
 #endif /* CONFIG_H */

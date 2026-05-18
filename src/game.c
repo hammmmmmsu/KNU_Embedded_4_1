@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #include "config.h"
 #include "game.h"
@@ -16,14 +17,55 @@
 int dot_open(void)  { int fd = open(DEV_DOT,  O_WRONLY); if (fd<0) perror("dot");  return fd; }
 int led_open(void)  { int fd = open(DEV_LED,  O_WRONLY); if (fd<0) perror("led");  return fd; }
 int fnd_open(void)  { int fd = open(DEV_FND,  O_WRONLY); if (fd<0) perror("fnd");  return fd; }
-int dip_open(void)  { int fd = open(DEV_DIP,  O_RDONLY); if (fd<0) perror("dip");  return fd; }
-int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY | O_NONBLOCK); if (fd<0) perror("push"); return fd; }
+int dip_open(void)  { int fd = open(DEV_DIP, O_RDONLY); if (fd<0) perror("dip"); return fd; }
+
+/* GPIO sysfs 버튼 초기화: export → direction=in → value 파일 열기 */
+int push_open(void)
+{
+    char path[64];
+
+    /* export (이미 export됐으면 EBUSY 무시) */
+    int efd = open("/sys/class/gpio/export", O_WRONLY);
+    if (efd >= 0) {
+        char num[8];
+        snprintf(num, sizeof(num), "%d", BTN_GPIO_NUM);
+        write(efd, num, strlen(num));
+        close(efd);
+        usleep(100000); /* udev가 파일 생성할 시간 */
+    }
+
+    /* direction = in */
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", BTN_GPIO_NUM);
+    int dfd = open(path, O_WRONLY);
+    if (dfd >= 0) { write(dfd, "in", 2); close(dfd); }
+
+    /* value 파일 열기 */
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", BTN_GPIO_NUM);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "gpio%d/value open failed: %s\n", BTN_GPIO_NUM, strerror(errno));
+        fprintf(stderr, "  → BTN_GPIO_NUM(%d) 이 틀렸을 수 있음. 'raspi-gpio get' 로 핀 번호 확인!\n", BTN_GPIO_NUM);
+    }
+    return fd;
+}
 
 void dot_close(int fd)  { close(fd); }
 void led_close(int fd)  { close(fd); }
 void fnd_close(int fd)  { close(fd); }
 void dip_close(int fd)  { close(fd); }
-void push_close(int fd) { close(fd); }
+
+/* GPIO unexport */
+void push_close(int fd)
+{
+    close(fd);
+    int efd = open("/sys/class/gpio/unexport", O_WRONLY);
+    if (efd >= 0) {
+        char num[8];
+        snprintf(num, sizeof(num), "%d", BTN_GPIO_NUM);
+        write(efd, num, strlen(num));
+        close(efd);
+    }
+}
 
 /* ── device write/read helpers ───────────────────────────── */
 
@@ -65,13 +107,13 @@ void fnd_write_mission(int fd, int mission_no, int sec)
     write(fd, d, 4);
 }
 
-/* push: O_NONBLOCK으로 열어서 버튼 안 눌리면 즉시 0 반환 */
+/* GPIO sysfs value 읽기: 눌리면 0(active-low) or 1(active-high) */
 unsigned char push_read(int fd)
 {
-    unsigned short val = 0;   /* 드라이버가 unsigned short(2바이트) 반환 */
-    ssize_t n = read(fd, &val, sizeof(val));
-    if (n <= 0) return 0;
-    return (unsigned char)(val & 0xFF); /* 하위 8비트: SW8~SW15 */
+    char c = '0';
+    lseek(fd, 0, SEEK_SET);
+    read(fd, &c, 1);
+    return (c == '1') ? 1 : 0;
 }
 
 unsigned char dip_read(int fd)
@@ -116,21 +158,7 @@ static void print_bits(unsigned char v)
 
 /* ── button debounce (30ms) ──────────────────────────────── */
 
-/* push_read (non-blocking — fd must be opened O_NONBLOCK) */
-static unsigned short push_read_nb(int fd)
-{
-    unsigned short val = 0;
-    ssize_t n = read(fd, &val, sizeof(val));
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return 0;   /* nothing pressed */
-        return 0;
-    }
-    if (n == 0) return 0;
-    return val;
-}
-
-/* 1초마다 raw push 값 출력 (디버그용) */
+/* 1초마다 GPIO 상태 출력 (디버그 — 버튼 눌리면 1 찍히면 정상) */
 static void push_diag_print(int fd)
 {
     static struct timespec last = {0, 0};
@@ -141,20 +169,20 @@ static void push_diag_print(int fd)
     if (diff < 1000) return;
     last = now;
 
-    unsigned short raw = push_read_nb(fd);
-    printf("\r  [PUSH raw=0x%04X]  버튼을 눌러보세요 ...    ", raw);
+    unsigned char val = push_read(fd);
+    printf("\r  [GPIO%d=%d]  노란 버튼을 눌러보세요 (1이 되면 정상) ...", BTN_GPIO_NUM, val);
     fflush(stdout);
 }
 
-/* BTN_START(SW8=bit0) 이 눌려 있으면 1 반환 */
+/* 버튼 눌려 있으면 1 반환 */
 static int btn_pressed(int fd)
 {
-    return (push_read_nb(fd) & BTN_START) ? 1 : 0;
+    return push_read(fd) ? 1 : 0;
 }
 
 static void wait_btn_release(int fd)
 {
-    while (push_read_nb(fd) & BTN_START)
+    while (push_read(fd))
         usleep(50000);
     usleep(50000); /* 디바운스 */
 }
