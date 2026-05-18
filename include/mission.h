@@ -1,6 +1,7 @@
 #ifndef MISSION_H
 #define MISSION_H
 
+#include "config.h"
 #include "game.h"
 
 typedef enum {
@@ -15,7 +16,7 @@ typedef struct {
     unsigned char target;      /* target pattern for DIP / LED missions */
 } Mission;
 
-extern Mission missions[3];
+extern Mission missions[MISSION_COUNT];
 
 /* Run one step of the current mission. Returns 1 if mission completed. */
 int mission_update(GameCtx *ctx, Mission *m);
