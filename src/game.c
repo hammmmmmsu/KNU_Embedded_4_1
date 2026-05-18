@@ -8,129 +8,252 @@
 #include "config.h"
 #include "game.h"
 #include "dot_driver.h"
-#include "led_driver.h"
-#include "fnd_driver.h"
-#include "interrupt_driver.h"
-#include "dip_driver.h"
-#include "mission.h"
 #include "../assets/dot_patterns.h"
 
-/* ── helpers ──────────────────────────────────────────────── */
+/* ── device open/close ───────────────────────────────────── */
 
-static long ms_elapsed(const struct timespec *start)
+int dot_open(void)  { int fd = open(DEV_DOT,  O_WRONLY); if (fd<0) perror("dot");  return fd; }
+int led_open(void)  { int fd = open(DEV_LED,  O_WRONLY); if (fd<0) perror("led");  return fd; }
+int fnd_open(void)  { int fd = open(DEV_FND,  O_WRONLY); if (fd<0) perror("fnd");  return fd; }
+int dip_open(void)  { int fd = open(DEV_DIP,  O_RDONLY); if (fd<0) perror("dip");  return fd; }
+int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY); if (fd<0) perror("push"); return fd; }
+
+void dot_close(int fd)  { close(fd); }
+void led_close(int fd)  { close(fd); }
+void fnd_close(int fd)  { close(fd); }
+void dip_close(int fd)  { close(fd); }
+void push_close(int fd) { close(fd); }
+
+/* ── device write/read helpers ───────────────────────────── */
+
+void dot_write_pattern(int fd, const unsigned char *pat)
 {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (now.tv_sec  - start->tv_sec)  * 1000L
-         + (now.tv_nsec - start->tv_nsec) / 1000000L;
-}
-
-static void timestamp(struct timespec *ts)
-{
-    clock_gettime(CLOCK_MONOTONIC, ts);
-}
-
-/* ── device wrappers ──────────────────────────────────────── */
-
-int dot_open(void)
-{
-    int fd = open(DEV_DOT, O_WRONLY);
-    if (fd < 0) perror("dot_open");
-    return fd;
-}
-
-void dot_close(int fd)   { close(fd); }
-
-void dot_write_pattern(int fd, const unsigned char *pattern)
-{
-    write(fd, pattern, DOT_ROW_COUNT);
+    write(fd, pat, DOT_ROW_COUNT);
 }
 
 void dot_clear(int fd)
 {
     static const unsigned char blank[DOT_ROW_COUNT] = {0};
-    dot_write_pattern(fd, blank);
+    write(fd, blank, DOT_ROW_COUNT);
 }
-
-int led_open(void)
-{
-    int fd = open(DEV_LED, O_WRONLY);
-    if (fd < 0) perror("led_open");
-    return fd;
-}
-
-void led_close(int fd)   { close(fd); }
 
 void led_write(int fd, unsigned char mask)
 {
     write(fd, &mask, 1);
 }
 
-int fnd_open(void)
+/* FND: 4자리 BCD (digit[0]=천, digit[3]=일) */
+void fnd_write_seconds(int fd, int sec)
 {
-    int fd = open(DEV_FND, O_WRONLY);
-    if (fd < 0) perror("fnd_open");
-    return fd;
+    unsigned char d[4];
+    if (sec < 0) sec = 0;
+    d[0] = 0x0F;                       /* blank */
+    d[1] = 0x0F;                       /* blank */
+    d[2] = (unsigned char)((sec / 10) % 10);
+    d[3] = (unsigned char)(sec % 10);
+    write(fd, d, 4);
 }
 
-void fnd_close(int fd)   { close(fd); }
-
-void fnd_write_seconds(int fd, int seconds)
+void fnd_write_mission(int fd, int mission_no, int sec)
 {
-    unsigned char digits[4];
-    if (seconds < 0) seconds = 0;
-    digits[0] = 0x0F;                    /* blank */
-    digits[1] = 0x0F;                    /* blank */
-    digits[2] = (unsigned char)((seconds / 10) % 10);
-    digits[3] = (unsigned char)(seconds % 10);
-    write(fd, digits, 4);
+    unsigned char d[4];
+    d[0] = (unsigned char)(mission_no & 0x0F); /* 미션 번호 */
+    d[1] = 0x0F;                               /* blank */
+    d[2] = (unsigned char)((sec / 10) % 10);
+    d[3] = (unsigned char)(sec % 10);
+    write(fd, d, 4);
 }
 
-void fnd_write_digits(int fd,
-                      unsigned char d0, unsigned char d1,
-                      unsigned char d2, unsigned char d3)
-{
-    unsigned char digits[4] = {d0, d1, d2, d3};
-    write(fd, digits, 4);
-}
-
-int push_open(void)
-{
-    int fd = open(DEV_PUSH, O_RDONLY);
-    if (fd < 0) perror("push_open");
-    return fd;
-}
-
-void push_close(int fd)   { close(fd); }
-
+/* push: 값 읽기 — char device는 lseek 안 됨, 그냥 read */
 unsigned char push_read(int fd)
 {
     unsigned char val = 0;
-    lseek(fd, 0, SEEK_SET);
     read(fd, &val, 1);
     return val;
 }
-
-int push_pressed(int fd, unsigned char btn_mask)
-{
-    return (push_read(fd) & btn_mask) ? 1 : 0;
-}
-
-int dip_open(void)
-{
-    int fd = open(DEV_DIP, O_RDONLY);
-    if (fd < 0) perror("dip_open");
-    return fd;
-}
-
-void dip_close(int fd)   { close(fd); }
 
 unsigned char dip_read(int fd)
 {
     unsigned char val = 0;
-    lseek(fd, 0, SEEK_SET);
     read(fd, &val, 1);
     return val;
+}
+
+/* ── elapsed helpers ─────────────────────────────────────── */
+
+static void ts_now(struct timespec *ts)
+{
+    clock_gettime(CLOCK_MONOTONIC, ts);
+}
+
+static long ts_elapsed_ms(const struct timespec *start)
+{
+    struct timespec now;
+    ts_now(&now);
+    return (now.tv_sec  - start->tv_sec)  * 1000L
+         + (now.tv_nsec - start->tv_nsec) / 1000000L;
+}
+
+/* ── terminal display helpers ────────────────────────────── */
+
+static void print_banner(void)
+{
+    printf("\033[2J\033[H"); /* clear screen */
+    printf("╔══════════════════════════════════╗\n");
+    printf("║       💣  BOMB  GAME  💣         ║\n");
+    printf("╚══════════════════════════════════╝\n\n");
+}
+
+static void print_bits(unsigned char v)
+{
+    int i;
+    for (i = 7; i >= 0; i--)
+        printf("%c", (v >> i) & 1 ? '1' : '0');
+}
+
+/* ── button debounce (30ms) ──────────────────────────────── */
+
+static int btn_pressed(int fd)
+{
+    unsigned char v = push_read(fd);
+    if (v == 0) return 0;
+    usleep(30000);
+    v = push_read(fd);
+    return v != 0;
+}
+
+static void wait_btn_release(int fd)
+{
+    while (push_read(fd) != 0)
+        usleep(10000);
+}
+
+/* ── fire animation (non-blocking) ──────────────────────── */
+
+void anim_bomb_fire(GameCtx *ctx)
+{
+    if (ts_elapsed_ms(&ctx->last_frame) < FIRE_FRAME_MS)
+        return;
+    ctx->fire_frame = (ctx->fire_frame + 1) % DOT_FIRE_FRAME_COUNT;
+    dot_write_pattern(ctx->fd_dot, DOT_BOMB_FIRE[ctx->fire_frame]);
+    led_write(ctx->fd_led, (ctx->fire_frame % 2) ? LED_ALL_ON : LED_ALL_OFF);
+    ts_now(&ctx->last_frame);
+}
+
+/* ── explosion animation (blocking) ─────────────────────── */
+
+void anim_explosion(GameCtx *ctx)
+{
+    int i, j;
+    printf("\n💥  BOOM!  💥\n\n");
+    for (i = 0; i < DOT_EXPLOSION_FRAME_COUNT; i++) {
+        dot_write_pattern(ctx->fd_dot, DOT_EXPLOSION[i]);
+        led_write(ctx->fd_led,
+                  (DOT_EXPLOSION[i][0] == 0x7F) ? LED_ALL_ON : LED_ALL_OFF);
+        usleep((unsigned int)DOT_EXPLOSION_DELAY_MS[i] * 1000);
+    }
+    for (j = 0; j < 6; j++) {
+        led_write(ctx->fd_led, j % 2 ? LED_ALL_ON : LED_ALL_OFF);
+        usleep(120000);
+    }
+    led_write(ctx->fd_led, LED_ALL_OFF);
+    dot_clear(ctx->fd_dot);
+}
+
+/* ── success animation (blocking) ───────────────────────── */
+
+void anim_success(GameCtx *ctx)
+{
+    static const unsigned char sp[] = DOT_SUCCESS;
+    int j;
+    dot_write_pattern(ctx->fd_dot, sp);
+    for (j = 0; j < 4; j++) {
+        led_write(ctx->fd_led, LED_ALL_ON);
+        usleep(250000);
+        led_write(ctx->fd_led, LED_ALL_OFF);
+        usleep(150000);
+    }
+    led_write(ctx->fd_led, LED_ALL_ON);
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  MISSION: DIP switch 패턴 맞추기
+ *
+ *  - LED로 목표 패턴을 보여줌
+ *  - 사용자가 DIP 스위치를 같은 패턴으로 설정
+ *  - SW1(인터럽트 버튼) 눌러서 제출
+ *  - 맞으면 통과, 틀리면 -5초 페널티 후 재도전
+ * ═══════════════════════════════════════════════════════════ */
+
+static unsigned char mission_targets[MISSION_COUNT];
+
+static void mission_show(GameCtx *ctx, int idx)
+{
+    printf("\n┌─────────────────────────────┐\n");
+    printf("│  미션 %d / %d                 │\n", idx + 1, MISSION_COUNT);
+    printf("│  남은 시간: %2d초             │\n", ctx->time_left);
+    printf("│                             │\n");
+    printf("│  LED 패턴:  ");
+    print_bits(mission_targets[idx]);
+    printf("  │\n");
+    printf("│  DIP 스위치를 맞추고        │\n");
+    printf("│  SW1(인터럽트) 버튼 누르기  │\n");
+    printf("└─────────────────────────────┘\n");
+    led_write(ctx->fd_led, mission_targets[idx]);
+}
+
+/* mission 진행 — 1 step씩 호출됨. 완료 시 1 반환 */
+static int mission_step(GameCtx *ctx, int idx)
+{
+    static int last_show = -1;   /* 마지막으로 출력한 미션 인덱스 */
+    unsigned char dip;
+
+    /* 미션이 바뀌었을 때만 화면 출력 */
+    if (last_show != idx) {
+        mission_show(ctx, idx);
+        last_show = idx;
+    }
+
+    dip = dip_read(ctx->fd_dip);
+
+    /* 현재 DIP 상태 한 줄 갱신 */
+    printf("\r  현재 DIP:  ");
+    print_bits(dip);
+    if (dip == mission_targets[idx])
+        printf("  ✓ 일치! SW1 눌러서 제출  ");
+    else
+        printf("  ✗ 불일치              ");
+    fflush(stdout);
+
+    /* SW1 누름 감지 */
+    if (!btn_pressed(ctx->fd_push))
+        return 0;
+
+    wait_btn_release(ctx->fd_push);
+
+    if (dip == mission_targets[idx]) {
+        printf("\n\n  [OK] 미션 %d 해제 성공!\n", idx + 1);
+        led_write(ctx->fd_led, LED_ALL_ON);
+        usleep(400000);
+        led_write(ctx->fd_led, LED_ALL_OFF);
+        last_show = -1;   /* 다음 미션 때 다시 출력 */
+        return 1;
+    } else {
+        printf("\n\n  [!!] 틀렸습니다! -5초 페널티\n");
+        /* 경고 LED 점멸 */
+        int j;
+        for (j = 0; j < 4; j++) {
+            led_write(ctx->fd_led, LED_ALL_ON);
+            usleep(100000);
+            led_write(ctx->fd_led, LED_ALL_OFF);
+            usleep(100000);
+        }
+        ctx->time_left -= 5;
+        if (ctx->time_left < 0) ctx->time_left = 0;
+        /* 패턴 다시 표시 */
+        mission_show(ctx, idx);
+        return 0;
+    }
 }
 
 /* ── game_init / game_destroy ────────────────────────────── */
@@ -138,30 +261,28 @@ unsigned char dip_read(int fd)
 int game_init(GameCtx *ctx)
 {
     memset(ctx, 0, sizeof(*ctx));
-
     ctx->fd_led  = led_open();
     ctx->fd_fnd  = fnd_open();
     ctx->fd_dot  = dot_open();
     ctx->fd_dip  = dip_open();
     ctx->fd_push = push_open();
 
-    if (ctx->fd_led < 0 || ctx->fd_fnd < 0 || ctx->fd_dot  < 0 ||
-        ctx->fd_dip < 0 || ctx->fd_push < 0)
+    if (ctx->fd_led<0 || ctx->fd_fnd<0 || ctx->fd_dot<0 ||
+        ctx->fd_dip<0 || ctx->fd_push<0)
         return -1;
 
-    ctx->state        = STATE_WAITING;
-    ctx->time_left    = GAME_TIME_SEC;
-    ctx->mission_index = 0;
-    ctx->fire_frame   = 0;
+    ctx->state      = STATE_WAITING;
+    ctx->time_left  = GAME_TIME_SEC;
+    ctx->fire_frame = 0;
+    ts_now(&ctx->last_frame);
+    ts_now(&ctx->last_tick);
 
-    timestamp(&ctx->last_tick);
-    timestamp(&ctx->last_frame);
-
-    /* Initial display */
     led_write(ctx->fd_led, LED_ALL_OFF);
     fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
     dot_write_pattern(ctx->fd_dot, DOT_BOMB_FIRE[0]);
 
+    print_banner();
+    printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
     return 0;
 }
 
@@ -169,7 +290,6 @@ void game_destroy(GameCtx *ctx)
 {
     led_write(ctx->fd_led, LED_ALL_OFF);
     dot_clear(ctx->fd_dot);
-
     led_close(ctx->fd_led);
     fnd_close(ctx->fd_fnd);
     dot_close(ctx->fd_dot);
@@ -177,84 +297,7 @@ void game_destroy(GameCtx *ctx)
     push_close(ctx->fd_push);
 }
 
-/* ── animations ──────────────────────────────────────────── */
-
-/*
- * anim_bomb_fire: cycle fire frames every FIRE_FRAME_MS milliseconds.
- * Also blinks the LED bar slowly (all on/off every ~500ms).
- */
-void anim_bomb_fire(GameCtx *ctx)
-{
-    long elapsed = ms_elapsed(&ctx->last_frame);
-    if (elapsed < FIRE_FRAME_MS)
-        return;
-
-    ctx->fire_frame = (ctx->fire_frame + 1) % DOT_FIRE_FRAME_COUNT;
-    dot_write_pattern(ctx->fd_dot, DOT_BOMB_FIRE[ctx->fire_frame]);
-
-    /* Slow LED blink: on for even frames, off for odd */
-    led_write(ctx->fd_led,
-              (ctx->fire_frame % 2 == 0) ? LED_ALL_ON : LED_ALL_OFF);
-
-    timestamp(&ctx->last_frame);
-}
-
-/*
- * anim_explosion: plays the full explosion sequence and sets state to FAIL.
- * Blocking — runs the whole animation then returns.
- */
-void anim_explosion(GameCtx *ctx)
-{
-    int i, j;
-
-    for (i = 0; i < DOT_EXPLOSION_FRAME_COUNT; i++) {
-        dot_write_pattern(ctx->fd_dot, DOT_EXPLOSION[i]);
-
-        /* On flash frames (all-on), also blast the LEDs */
-        if (DOT_EXPLOSION[i][0] == 0x7F) {
-            led_write(ctx->fd_led, LED_ALL_ON);
-        } else {
-            led_write(ctx->fd_led, LED_ALL_OFF);
-        }
-
-        usleep((unsigned int)DOT_EXPLOSION_DELAY_MS[i] * 1000);
-    }
-
-    /* Final rapid LED flash x5 then all off — "사라지는" 효과 */
-    for (j = 0; j < 5; j++) {
-        led_write(ctx->fd_led, LED_ALL_ON);
-        usleep(100000);
-        led_write(ctx->fd_led, LED_ALL_OFF);
-        usleep(100000);
-    }
-
-    dot_clear(ctx->fd_dot);
-    led_write(ctx->fd_led, LED_ALL_OFF);
-    fnd_write_digits(ctx->fd_fnd, 0x0F, 0x0F, 0x0F, 0x0F); /* blank FND */
-}
-
-/*
- * anim_success: heart pattern on DOT, all LEDs on, FND shows "good".
- */
-void anim_success(GameCtx *ctx)
-{
-    static const unsigned char success_pat[] = DOT_SUCCESS;
-    int j;
-
-    dot_write_pattern(ctx->fd_dot, success_pat);
-
-    /* Three celebratory LED flashes */
-    for (j = 0; j < 3; j++) {
-        led_write(ctx->fd_led, LED_ALL_ON);
-        usleep(300000);
-        led_write(ctx->fd_led, LED_ALL_OFF);
-        usleep(200000);
-    }
-    led_write(ctx->fd_led, LED_ALL_ON);
-    fnd_write_digits(ctx->fd_fnd, 0x0, 0x0, 0x0, 0x0); /* "0000" */
-}
-
-/* ── game_update ─────────────────────────────────────────── */
+/* ── game_update (메인 루프에서 매 10ms 호출) ─────────────── */
 
 void game_update(GameCtx *ctx)
 {
@@ -265,66 +308,91 @@ void game_update(GameCtx *ctx)
         anim_bomb_fire(ctx);
         fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
 
-        if (push_pressed(ctx->fd_push, BTN_START)) {
-            usleep(200000); /* debounce */
-            ctx->state       = STATE_PLAYING;
-            ctx->time_left   = GAME_TIME_SEC;
+        if (btn_pressed(ctx->fd_push)) {
+            wait_btn_release(ctx->fd_push);
+
+            /* 랜덤 미션 패턴 생성 (0 제외) */
+            srand((unsigned int)time(NULL));
+            int i;
+            for (i = 0; i < MISSION_COUNT; i++)
+                mission_targets[i] = (unsigned char)(rand() % 255 + 1);
+
+            ctx->state         = STATE_PLAYING;
+            ctx->time_left     = GAME_TIME_SEC;
             ctx->mission_index = 0;
-            mission_init(&missions[0], 0);
-            timestamp(&ctx->last_tick);
-            timestamp(&ctx->last_frame);
+            ts_now(&ctx->last_tick);
+            ts_now(&ctx->last_frame);
+
+            print_banner();
+            printf("  ██ 게임 시작! 폭탄을 해제하세요! ██\n");
+            printf("  총 %d개의 미션을 %d초 안에 완료!\n\n",
+                   MISSION_COUNT, GAME_TIME_SEC);
             led_write(ctx->fd_led, LED_ALL_OFF);
         }
         break;
 
     /* ── PLAYING ─────────────────────────────────────── */
     case STATE_PLAYING: {
-        /* Countdown */
-        long elapsed_sec = ms_elapsed(&ctx->last_tick) / 1000;
-        if (elapsed_sec >= 1) {
-            ctx->time_left -= (int)elapsed_sec;
-            timestamp(&ctx->last_tick);
-            fnd_write_seconds(ctx->fd_fnd, ctx->time_left);
-
+        /* 1초마다 카운트다운 */
+        long e = ts_elapsed_ms(&ctx->last_tick);
+        if (e >= 1000) {
+            ctx->time_left -= (int)(e / 1000);
+            ts_now(&ctx->last_tick);
+            fnd_write_mission(ctx->fd_fnd, ctx->mission_index + 1,
+                              ctx->time_left);
             if (ctx->time_left <= 0) {
                 ctx->state = STATE_FAIL;
                 break;
             }
         }
 
-        /* Run current mission */
-        if (ctx->mission_index < MISSION_COUNT) {
-            Mission *m = &missions[ctx->mission_index];
-            if (mission_update(ctx, m)) {
-                ctx->mission_index++;
-                if (ctx->mission_index < MISSION_COUNT)
-                    mission_init(&missions[ctx->mission_index],
-                                 ctx->mission_index);
-                else
-                    ctx->state = STATE_SUCCESS;
-            }
+        /* DOT: 폭탄 불꽃 유지 */
+        anim_bomb_fire(ctx);
+
+        /* 현재 미션 진행 */
+        if (mission_step(ctx, ctx->mission_index)) {
+            ctx->mission_index++;
+            if (ctx->mission_index >= MISSION_COUNT)
+                ctx->state = STATE_SUCCESS;
         }
         break;
     }
 
     /* ── SUCCESS ─────────────────────────────────────── */
     case STATE_SUCCESS:
+        print_banner();
+        printf("  ★★★  폭탄 해제 성공!  ★★★\n\n");
+        printf("  남은 시간: %d초\n\n", ctx->time_left);
         anim_success(ctx);
+        fnd_write_seconds(ctx->fd_fnd, ctx->time_left);
         sleep(3);
-        ctx->state = STATE_WAITING;
-        ctx->time_left = GAME_TIME_SEC;
+
+        /* 대기 상태로 복귀 */
+        ctx->state      = STATE_WAITING;
+        ctx->time_left  = GAME_TIME_SEC;
         ctx->mission_index = 0;
-        timestamp(&ctx->last_frame);
+        led_write(ctx->fd_led, LED_ALL_OFF);
+        fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
+        print_banner();
+        printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
+        ts_now(&ctx->last_frame);
         break;
 
     /* ── FAIL ────────────────────────────────────────── */
     case STATE_FAIL:
+        print_banner();
+        printf("  ▓▓▓  시간 초과 — 폭발!  ▓▓▓\n\n");
         anim_explosion(ctx);
+        fnd_write_seconds(ctx->fd_fnd, 0);
         sleep(2);
-        ctx->state = STATE_WAITING;
-        ctx->time_left = GAME_TIME_SEC;
+
+        ctx->state      = STATE_WAITING;
+        ctx->time_left  = GAME_TIME_SEC;
         ctx->mission_index = 0;
-        timestamp(&ctx->last_frame);
+        fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
+        print_banner();
+        printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
+        ts_now(&ctx->last_frame);
         break;
     }
 }

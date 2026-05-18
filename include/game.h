@@ -11,30 +11,49 @@ typedef enum {
 } GameState;
 
 typedef struct {
-    GameState    state;
-    int          time_left;      /* seconds remaining */
-    int          mission_index;  /* 0-based current mission */
-    int          mission_done;   /* missions completed */
+    GameState   state;
+    int         time_left;
+    int         mission_index;
 
-    int          fd_led;
-    int          fd_fnd;
-    int          fd_dot;
-    int          fd_dip;
-    int          fd_push;
+    int         fd_led;
+    int         fd_fnd;
+    int         fd_dot;
+    int         fd_dip;
+    int         fd_push;
 
-    struct timespec last_tick;   /* for countdown */
-    struct timespec last_frame;  /* for animation */
-    int          fire_frame;     /* current fire animation index */
+    struct timespec last_tick;
+    struct timespec last_frame;
+    int         fire_frame;
 } GameCtx;
 
-/* Initialise / teardown */
 int  game_init(GameCtx *ctx);
 void game_destroy(GameCtx *ctx);
-
-/* Main state-machine step — call in a tight loop */
 void game_update(GameCtx *ctx);
 
-/* Animations called from game_update */
+/* device helpers (game.c에 구현) */
+int           dot_open(void);
+void          dot_close(int fd);
+void          dot_write_pattern(int fd, const unsigned char *pattern);
+void          dot_clear(int fd);
+
+int           led_open(void);
+void          led_close(int fd);
+void          led_write(int fd, unsigned char mask);
+
+int           fnd_open(void);
+void          fnd_close(int fd);
+void          fnd_write_seconds(int fd, int sec);
+void          fnd_write_mission(int fd, int mission_no, int sec);
+
+int           push_open(void);
+void          push_close(int fd);
+unsigned char push_read(int fd);
+
+int           dip_open(void);
+void          dip_close(int fd);
+unsigned char dip_read(int fd);
+
+/* animations */
 void anim_bomb_fire(GameCtx *ctx);
 void anim_explosion(GameCtx *ctx);
 void anim_success(GameCtx *ctx);
