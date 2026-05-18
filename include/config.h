@@ -18,8 +18,13 @@
 #define LED_ALL_OFF  0x00
 #define LED_BLINK_MS 200
 
-/* Push-switch bitmasks (active-high after driver inversion) */
-#define BTN_START   0x80   /* SW1 - game start / mission confirm */
-#define BTN_ANY     0xFF
+/*
+ * Push-switch 비트 (~/try/push_driver.c 기준)
+ *   bit0=SW8, bit1=SW9, ..., bit8=SW16
+ *   → SW8(bit0) = 0x0001 을 Start/Confirm 버튼으로 사용
+ *   → SW9(bit1) = 0x0002 도 Confirm 으로 인정
+ */
+#define BTN_START   0x01   /* SW8 — 게임 시작 / 미션 제출 */
+#define BTN_ANY     0x1FF  /* 9개 버튼 중 아무거나 */
 
 #endif /* CONFIG_H */

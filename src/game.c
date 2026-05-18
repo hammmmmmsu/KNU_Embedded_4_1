@@ -16,7 +16,7 @@ int dot_open(void)  { int fd = open(DEV_DOT,  O_WRONLY); if (fd<0) perror("dot")
 int led_open(void)  { int fd = open(DEV_LED,  O_WRONLY); if (fd<0) perror("led");  return fd; }
 int fnd_open(void)  { int fd = open(DEV_FND,  O_WRONLY); if (fd<0) perror("fnd");  return fd; }
 int dip_open(void)  { int fd = open(DEV_DIP,  O_RDONLY); if (fd<0) perror("dip");  return fd; }
-int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY | O_NONBLOCK); if (fd<0) perror("push"); return fd; }
+int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY); if (fd<0) perror("push"); return fd; }
 
 void dot_close(int fd)  { close(fd); }
 void led_close(int fd)  { close(fd); }
@@ -70,8 +70,7 @@ unsigned char push_read(int fd)
     unsigned short val = 0;   /* 드라이버가 unsigned short(2바이트) 반환 */
     ssize_t n = read(fd, &val, sizeof(val));
     if (n <= 0) return 0;
-    printf("[DEBUG] push raw=0x%04X\n", val); fflush(stdout);
-    return (val != 0) ? 1 : 0;
+    return (unsigned char)(val & 0xFF); /* 하위 8비트: SW8~SW15 */
 }
 
 unsigned char dip_read(int fd)
@@ -116,19 +115,17 @@ static void print_bits(unsigned char v)
 
 /* ── button debounce (30ms) ──────────────────────────────── */
 
+/* BTN_START(SW8=bit0) 이 눌려 있으면 1 반환 */
 static int btn_pressed(int fd)
 {
-    unsigned char v = push_read(fd);
-    if (v == 0) return 0;
-    usleep(30000);
-    v = push_read(fd);
-    return v != 0;
+    return (push_read(fd) & BTN_START) ? 1 : 0;
 }
 
 static void wait_btn_release(int fd)
 {
-    while (push_read(fd) != 0)
-        usleep(10000);
+    while (push_read(fd) & BTN_START)
+        usleep(50000);
+    usleep(50000); /* 디바운스 */
 }
 
 /* ── fire animation (non-blocking) ──────────────────────── */
@@ -280,16 +277,9 @@ int game_init(GameCtx *ctx)
     ts_now(&ctx->last_frame);
     ts_now(&ctx->last_tick);
 
-    printf("[DEBUG] writing to LED fd=%d\n", ctx->fd_led); fflush(stdout);
     led_write(ctx->fd_led, LED_ALL_OFF);
-    printf("[DEBUG] writing to FND fd=%d\n", ctx->fd_fnd); fflush(stdout);
     fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
-    printf("[DEBUG] writing to DOT fd=%d\n", ctx->fd_dot); fflush(stdout);
     dot_write_pattern(ctx->fd_dot, DOT_BOMB_FIRE[0]);
-    printf("[DEBUG] reading PUSH fd=%d\n", ctx->fd_push); fflush(stdout);
-    { unsigned char t = push_read(ctx->fd_push); printf("[DEBUG] push=%d\n", t); fflush(stdout); }
-    printf("[DEBUG] reading DIP fd=%d\n", ctx->fd_dip); fflush(stdout);
-    { unsigned char t = dip_read(ctx->fd_dip); printf("[DEBUG] dip=%d\n", t); fflush(stdout); }
 
     print_banner();
     printf("  SW1(인터럽트 버튼)을 눌러 게임을 시작하세요.\n\n");
