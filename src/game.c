@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <errno.h>
 
 #include "config.h"
 #include "game.h"
@@ -16,7 +17,7 @@ int dot_open(void)  { int fd = open(DEV_DOT,  O_WRONLY); if (fd<0) perror("dot")
 int led_open(void)  { int fd = open(DEV_LED,  O_WRONLY); if (fd<0) perror("led");  return fd; }
 int fnd_open(void)  { int fd = open(DEV_FND,  O_WRONLY); if (fd<0) perror("fnd");  return fd; }
 int dip_open(void)  { int fd = open(DEV_DIP,  O_RDONLY); if (fd<0) perror("dip");  return fd; }
-int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY); if (fd<0) perror("push"); return fd; }
+int push_open(void) { int fd = open(DEV_PUSH, O_RDONLY | O_NONBLOCK); if (fd<0) perror("push"); return fd; }
 
 void dot_close(int fd)  { close(fd); }
 void led_close(int fd)  { close(fd); }
@@ -115,15 +116,45 @@ static void print_bits(unsigned char v)
 
 /* ── button debounce (30ms) ──────────────────────────────── */
 
+/* push_read (non-blocking — fd must be opened O_NONBLOCK) */
+static unsigned short push_read_nb(int fd)
+{
+    unsigned short val = 0;
+    ssize_t n = read(fd, &val, sizeof(val));
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;   /* nothing pressed */
+        return 0;
+    }
+    if (n == 0) return 0;
+    return val;
+}
+
+/* 1초마다 raw push 값 출력 (디버그용) */
+static void push_diag_print(int fd)
+{
+    static struct timespec last = {0, 0};
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long diff = (now.tv_sec - last.tv_sec) * 1000L
+              + (now.tv_nsec - last.tv_nsec) / 1000000L;
+    if (diff < 1000) return;
+    last = now;
+
+    unsigned short raw = push_read_nb(fd);
+    printf("\r  [PUSH raw=0x%04X]  버튼을 눌러보세요 ...    ", raw);
+    fflush(stdout);
+}
+
 /* BTN_START(SW8=bit0) 이 눌려 있으면 1 반환 */
 static int btn_pressed(int fd)
 {
-    return (push_read(fd) & BTN_START) ? 1 : 0;
+    return (push_read_nb(fd) & BTN_START) ? 1 : 0;
 }
 
 static void wait_btn_release(int fd)
 {
-    while (push_read(fd) & BTN_START)
+    while (push_read_nb(fd) & BTN_START)
         usleep(50000);
     usleep(50000); /* 디바운스 */
 }
@@ -307,6 +338,7 @@ void game_update(GameCtx *ctx)
     case STATE_WAITING:
         anim_bomb_fire(ctx);
         fnd_write_seconds(ctx->fd_fnd, GAME_TIME_SEC);
+        push_diag_print(ctx->fd_push);
 
         if (btn_pressed(ctx->fd_push)) {
             wait_btn_release(ctx->fd_push);
